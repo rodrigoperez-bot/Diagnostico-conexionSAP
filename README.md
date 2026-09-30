@@ -11,17 +11,18 @@ Script de PowerShell que evalua el enlace desde el PC del trabajador hacia Googl
 irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
 ```
 
-3. Esperar entre 3 y 4 minutos. Al terminar se muestra un resumen y se guarda **Informe Servicios.txt** en el Escritorio.
+3. Esperar entre 3 y 4 minutos. Si no hay red local ni internet, el script lo indica y termina antes. Al terminar se muestra un resumen y se guarda **Informe Servicios.txt** en el Escritorio.
 4. Enviar ese archivo a TI.
 
 ## Que informa
 
 - Nombre del host, direccion MAC e IP local
 - IP publica, pais, ciudad y proveedor (ISP)
-- Gateway local: latencia, jitter y perdida
-- Salida a internet por el puerto 443 (HTTPS)
-- Google Meet, Drive, Mail y Chat: latencia TCP, jitter, perdida, puerto 443 y ruta salto a salto
-- Servicio SAP: latencia, jitter, perdida, estado del puerto SAP y ruta salto a salto
+- Red local (se revisa primero): tipo de conexion (cable o Wi-Fi), senal Wi-Fi, velocidad del enlace, latencia, jitter, perdida y ruta hacia la puerta de enlace, con deteccion de cuellos de botella
+- DNS: servidores configurados, si responden, tiempo de resolucion y diagnostico de problemas de DNS
+- Salida a internet
+- Google Meet, Drive, Mail y Chat: latencia, jitter, perdida y ruta salto a salto
+- Servicio SAP: latencia, jitter, perdida y ruta salto a salto
 - Diagnostico SAP (OPTIMO / ELEVADO / ALERTA CRITICA)
 - Registro crudo del tracert de cada servicio
 

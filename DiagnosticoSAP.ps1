@@ -329,6 +329,49 @@ function Procesar-Ruta($ipDestino, $maxSaltos = $MAX_SALTOS, $limiteSeg = $LIMIT
 
 function Escribir-Paso($texto) { Write-Host "  > $texto" -ForegroundColor Cyan }
 
+function Obtener-InterfazActiva($ipLocal) {
+    $info = @{ nombre = 'Desconocida'; tipo = 'Desconocido'; velocidad = 'Desconocida'; mbps = 0; dns = @(); senal = ''; senalPct = -1 }
+    try {
+        $nic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+            $_.OperationalStatus -eq 'Up' -and ($_.GetIPProperties().UnicastAddresses | Where-Object { $_.Address.ToString() -eq $ipLocal })
+        } | Select-Object -First 1
+        if ($nic) {
+            $info.nombre = $nic.Name
+            $t = "$($nic.NetworkInterfaceType)"
+            $info.tipo = if ($t -eq 'Wireless80211') { 'Wi-Fi' } elseif ($t -like '*Ethernet*') { 'Cable (Ethernet)' } else { $t }
+            if ($nic.Speed -gt 0 -and $nic.Speed -lt 1000000000000) { $info.mbps = [math]::Round($nic.Speed / 1000000); $info.velocidad = "$($info.mbps) Mbps" }
+            $info.dns = @($nic.GetIPProperties().DnsAddresses | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.ToString() })
+        }
+    } catch {}
+    if ($info.tipo -eq 'Wi-Fi') {
+        try {
+            $w = (netsh wlan show interfaces) | Out-String
+            $m = [regex]::Match($w, '(?:Se.al|Signal)\s*:\s*(\d+)\s*%')
+            if ($m.Success) { $info.senalPct = [int]$m.Groups[1].Value; $info.senal = "$($info.senalPct) %" }
+        } catch {}
+    }
+    return $info
+}
+
+function Probar-DNS($servidor, $nombre) {
+    # Consulta directa al servidor DNS indicado (sin cache local ni archivo hosts)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $r = Resolve-DnsName -Name $nombre -Server $servidor -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop
+        $sw.Stop()
+        if ($r | Where-Object { $_.Type -eq 'A' }) { return @{ ok = $true; ms = [int]$sw.ElapsedMilliseconds } }
+    } catch {}
+    return @{ ok = $false; ms = 0 }
+}
+
+function Probar-DNSSistema($nombre) {
+    # Resolucion usando la configuracion normal del equipo
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ip = Resolver-IP $nombre
+    $sw.Stop()
+    return @{ ok = [bool]$ip; ms = [int]$sw.ElapsedMilliseconds }
+}
+
 # ------------------------------------------------------------------
 # Ejecucion del diagnostico
 # ------------------------------------------------------------------
@@ -345,6 +388,124 @@ Write-Host '==================================================' -ForegroundColor
 Write-Host 'Analizando red... (aprox. 3-4 minutos por rutas completas)' -ForegroundColor Yellow
 Write-Host ''
 
+# ------------------------------------------------------------------
+# 1) Red local: equipo, interfaz y puerta de enlace
+# ------------------------------------------------------------------
+
+Escribir-Paso 'Identificando equipo local...'
+$datosHost = Obtener-DatosHostLocal
+$interfaz  = Obtener-InterfazActiva $datosHost.ip_local
+
+Escribir-Paso 'Evaluando puerta de enlace (red local)...'
+$gwIp = Obtener-Gateway
+$gwRes = @{ latencia = 'SIN RESPUESTA'; ms = 9999; jitter = 0; perdida = 100; est_gw = 'SIN RESPUESTA'; ip_gw = $gwIp }
+$rutaGw = $null
+if ($gwIp) {
+    $tiemposGw = Hacer-Pings $gwIp 10
+    if ($tiemposGw.Count -gt 0) {
+        $avgGw = [math]::Floor(($tiemposGw | Measure-Object -Sum).Sum / $tiemposGw.Count)
+        $gwRes = @{
+            latencia = "$avgGw ms"
+            ms       = $avgGw
+            jitter   = Calcular-Jitter $tiemposGw
+            perdida  = [math]::Round(((10 - $tiemposGw.Count) / 10) * 100, 1)
+            est_gw   = if ($avgGw -gt 20) { 'ALTO' } elseif ($avgGw -gt 5) { 'ELEVADO' } else { 'OK' }
+            ip_gw    = $gwIp
+        }
+    }
+    Write-Host '    Rastreando ruta hacia la puerta de enlace...' -ForegroundColor DarkCyan
+    $rutaGw = Procesar-Ruta $gwIp 5 20
+}
+
+# Diagnostico de la red local (cuellos de botella)
+$obsLocal = New-Object System.Collections.Generic.List[string]
+if (-not $gwIp) {
+    $diagLocal = 'ALERTA CRITICA: El equipo no tiene puerta de enlace. No esta conectado a la red o no recibio configuracion (DHCP).'
+    $colorLocal = 'Red'
+} elseif ($gwRes.ms -eq 9999) {
+    $diagLocal = 'ALERTA: La puerta de enlace no responde al ping. Puede estar caida o bloquear ICMP (revisar junto con la prueba de internet).'
+    $colorLocal = 'Red'
+} elseif ($gwRes.perdida -gt 0 -or $gwRes.ms -gt 20 -or $gwRes.jitter -ge 15) {
+    $diagLocal = 'CUELLO DE BOTELLA EN RED LOCAL: perdida, latencia o jitter altos hacia la puerta de enlace (Wi-Fi debil, cable/switch con falla o red saturada).'
+    $colorLocal = 'Red'
+} elseif ($gwRes.ms -gt 5 -or $gwRes.jitter -ge 5) {
+    $diagLocal = 'ELEVADO: La red local responde, pero con latencia o variacion mayor a lo normal.'
+    $colorLocal = 'Yellow'
+} else {
+    $diagLocal = 'OPTIMO (OK): La red local responde rapido y estable.'
+    $colorLocal = 'Green'
+}
+if ($interfaz.senalPct -ge 0 -and $interfaz.senalPct -lt 60) { $obsLocal.Add("Senal Wi-Fi debil ($($interfaz.senal)). Acercarse al access point o usar cable.") }
+if ($interfaz.mbps -gt 0 -and $interfaz.mbps -lt 100) { $obsLocal.Add("La tarjeta de red esta conectada a baja velocidad ($($interfaz.velocidad)). Revisar cable o puerto del switch.") }
+if ($rutaGw -and ($rutaGw.saltos | Where-Object { $_.nivel -ne 'gris' }).Count -gt 1) { $obsLocal.Add('La puerta de enlace esta a mas de un salto (posible VPN o red intermedia).') }
+
+# ------------------------------------------------------------------
+# 2) DNS y salida a internet
+# ------------------------------------------------------------------
+
+Escribir-Paso 'Verificando DNS...'
+$NOMBRES_DNS = @('www.google.com', $SAP_HOST)
+$hayResolveDns = [bool](Get-Command Resolve-DnsName -ErrorAction SilentlyContinue)
+$dnsServidores = @()
+foreach ($srvDns in ($interfaz.dns | Select-Object -First 3)) {
+    $pruebas = @($NOMBRES_DNS | ForEach-Object { if ($hayResolveDns) { Probar-DNS $srvDns $_ } else { @{ ok = $false; ms = 0 } } })
+    $okCount = @($pruebas | Where-Object { $_.ok }).Count
+    $msOk = @($pruebas | Where-Object { $_.ok } | ForEach-Object { $_.ms })
+    $avgDns = if ($msOk.Count -gt 0) { [math]::Floor(($msOk | Measure-Object -Sum).Sum / $msOk.Count) } else { 0 }
+    $dnsServidores += ,@{ ip = $srvDns; ok = $okCount; total = $pruebas.Count; ms = $avgDns }
+}
+$dnsSistema = @($NOMBRES_DNS | ForEach-Object { @{ nombre = $_; res = (Probar-DNSSistema $_) } })
+$dnsPublico = if ($hayResolveDns) { Probar-DNS '8.8.8.8' 'www.google.com' } else { @{ ok = $false; ms = 0 } }
+
+Escribir-Paso 'Verificando salida a internet...'
+$tiemposInet = Hacer-Pings '8.8.8.8' 4
+$internetPorIp = $tiemposInet.Count -gt 0
+$puerto443Salida = Comprobar-Puerto 'www.google.com' 443
+if ($puerto443Salida -ne 'ABIERTO' -and -not $internetPorIp) { $puerto443Salida = Comprobar-Puerto '8.8.8.8' 443 }
+if ($puerto443Salida -eq 'ABIERTO') { $internetPorIp = $true }
+
+$dnsConfigOk = @($dnsServidores | Where-Object { $_.ok -eq $_.total }).Count -gt 0
+$dnsSistemaOk = @($dnsSistema | Where-Object { $_.res.ok }).Count -eq $dnsSistema.Count
+$sapDnsOk = ($dnsSistema | Where-Object { $_.nombre -eq $SAP_HOST }).res.ok
+$googleDnsOk = ($dnsSistema | Where-Object { $_.nombre -eq 'www.google.com' }).res.ok
+$msDnsSis = @($dnsSistema | Where-Object { $_.res.ok } | ForEach-Object { $_.res.ms })
+$maxDnsMs = if ($msDnsSis.Count -gt 0) { ($msDnsSis | Measure-Object -Maximum).Maximum } else { 0 }
+$dnsLentos = @($dnsServidores | Where-Object { $_.ok -gt 0 -and $_.ms -ge 150 })
+
+if ($interfaz.dns.Count -eq 0 -and -not $dnsSistemaOk) {
+    $diagDns = 'PROBLEMA DNS: El equipo no tiene servidores DNS configurados.'
+    $colorDns = 'Red'
+} elseif (-not $dnsSistemaOk -and -not $googleDnsOk -and -not $internetPorIp) {
+    $diagDns = 'SIN INTERNET: No se resuelven nombres y tampoco hay salida a internet por IP. El problema esta antes del DNS (red local o proveedor).'
+    $colorDns = 'Red'
+} elseif (-not $googleDnsOk -and $dnsPublico.ok) {
+    $diagDns = 'PROBLEMA DNS: Los DNS configurados en el equipo no responden, pero un DNS publico (8.8.8.8) si. La falla esta en el DNS de la red/sucursal.'
+    $colorDns = 'Red'
+} elseif (-not $googleDnsOk) {
+    $diagDns = 'PROBLEMA DNS: Hay salida a internet por IP, pero no se resuelven nombres. Posible bloqueo de DNS en firewall o proveedor.'
+    $colorDns = 'Red'
+} elseif (-not $sapDnsOk) {
+    $diagDns = 'PROBLEMA DNS: Se resuelven nombres de internet, pero NO el dominio del servidor SAP.'
+    $colorDns = 'Red'
+} elseif ($hayResolveDns -and $interfaz.dns.Count -gt 0 -and -not $dnsConfigOk) {
+    $diagDns = 'ELEVADO: La resolucion funciona, pero alguno de los DNS configurados falla. El equipo depende de un DNS de respaldo.'
+    $colorDns = 'Yellow'
+} elseif ($maxDnsMs -ge 300 -or $dnsLentos.Count -gt 0) {
+    $diagDns = 'ELEVADO: El DNS responde, pero lento. Puede hacer que las paginas y servicios tarden en abrir.'
+    $colorDns = 'Yellow'
+} else {
+    $diagDns = 'OPTIMO (OK): El DNS resuelve correctamente y rapido.'
+    $colorDns = 'Green'
+}
+
+$geo = @{ ip = 'No disponible'; pais = 'Desconocido'; ciudad = 'Desconocida'; isp = 'Desconocido'; ok = $false }
+$pais = 'Chile'; $refMs = 0
+
+# Si no hay red local ni internet, no tiene sentido seguir con Google y SAP
+$sinRed = (-not $internetPorIp) -and ($puerto443Salida -ne 'ABIERTO') -and ($gwRes.ms -eq 9999)
+
+if (-not $sinRed) {
+
 Escribir-Paso 'Detectando ubicacion e IP publica...'
 $geo = Obtener-UbicacionPublica
 $pais = if ($geo.pais -and $REFERENCIAS.ContainsKey($geo.pais)) { $geo.pais } else { 'Chile' }
@@ -359,30 +520,6 @@ $refs = $REFERENCIAS[$pais]
 $refMs = if ($region -eq 'EU') { $refs.EU } elseif ($region -eq 'US') { $refs.US } else { [math]::Min($refs.EU, $refs.US) }
 $umbralRojo     = [math]::Ceiling($refMs * 1.20)
 $umbralAmarillo = [math]::Ceiling($refMs * 1.10)
-
-Escribir-Paso 'Identificando equipo local...'
-$datosHost = Obtener-DatosHostLocal
-
-Escribir-Paso 'Evaluando gateway (red local)...'
-$gwIp = Obtener-Gateway
-$gwRes = @{ latencia = 'SIN RESPUESTA'; jitter = 0; perdida = 100; est_gw = 'SIN RESPUESTA'; ip_gw = $gwIp }
-if ($gwIp) {
-    $tiemposGw = Hacer-Pings $gwIp 10
-    if ($tiemposGw.Count -gt 0) {
-        $avgGw = [math]::Floor(($tiemposGw | Measure-Object -Sum).Sum / $tiemposGw.Count)
-        $gwRes = @{
-            latencia = "$avgGw ms"
-            jitter   = Calcular-Jitter $tiemposGw
-            perdida  = [math]::Round(((10 - $tiemposGw.Count) / 10) * 100, 1)
-            est_gw   = if ($avgGw -gt 20) { 'ALTO' } elseif ($avgGw -gt 5) { 'ELEVADO' } else { 'OK' }
-            ip_gw    = $gwIp
-        }
-    }
-}
-
-# Verificar salida HTTPS (puerto 443 hacia internet)
-Escribir-Paso 'Verificando salida puerto 443 (HTTPS) hacia internet...'
-$puerto443Salida = Comprobar-Puerto 'www.google.com' 443
 
 # ------------------------------------------------------------------
 # Analisis servicios Google
@@ -441,14 +578,14 @@ Escribir-Paso 'Midiendo latencia, jitter y perdida hacia el servicio SAP...'
 $tiemposSrv = Hacer-Pings $SERVER_IP 10
 $srv = Evaluar-MetricasPing $tiemposSrv $umbralRojo $refMs
 
-Escribir-Paso 'Comprobando puerto TCP SAP...'
+Escribir-Paso 'Comprobando acceso al servicio SAP...'
 $puertoSap = Comprobar-Puerto $SERVER_IP $SERVER_PORT
 
 Escribir-Paso 'Rastreando ruta hacia SAP...'
 $ruta = Procesar-Ruta $SERVER_IP $MAX_SALTOS $LIMITE_SEG
 
 if ($srv.latencia -ge $umbralRojo -or $srv.perdida -ge 3 -or $puertoSap -ne 'ABIERTO') {
-    $diagTxt = 'ALERTA CRITICA: La conexion al servicio SAP presenta problemas criticos o los puertos estan bloqueados.'
+    $diagTxt = 'ALERTA CRITICA: La conexion al servicio SAP presenta problemas criticos o esta bloqueada.'
     $diagColor = 'Red'
 } elseif ($srv.latencia -ge $umbralAmarillo -or $srv.jitter -ge 15 -or $srv.perdida -gt 0) {
     $diagTxt = 'ELEVADO: Fluctuaciones moderadas o latencia superior a lo esperado hacia el servicio SAP. Rendimiento irregular.'
@@ -457,6 +594,8 @@ if ($srv.latencia -ge $umbralRojo -or $srv.perdida -ge 3 -or $puertoSap -ne 'ABI
     $diagTxt = 'OPTIMO (OK): Parametros dentro de rangos ideales. Conectividad estable y fluida hacia el servicio SAP.'
     $diagColor = 'Green'
 }
+
+} # fin if (-not $sinRed)
 
 # ------------------------------------------------------------------
 # Generacion del informe de texto
@@ -481,21 +620,72 @@ L "  Nombre del Host    : $($datosHost.nombre)"
 L "  Direccion MAC      : $($datosHost.mac)"
 L "  IP Local           : $($datosHost.ip_local)"
 L ''
-L '  ---- ESTADO RED LOCAL (GATEWAY) ----'
-if ($gwRes.latencia -ne 'SIN RESPUESTA') {
-    L "  Gateway            : $(if ($gwRes.ip_gw) { $gwRes.ip_gw } else { 'N/D' })"
-    L "  Latencia gateway   : $($gwRes.latencia)  [$($gwRes.est_gw)]"
-    L "  Jitter gateway     : $($gwRes.jitter) ms"
-    L "  Perdida gateway    : $($gwRes.perdida) %"
-} else {
-    L '  Gateway            : SIN RESPUESTA'
+L '  ---- INTERFAZ DE RED ----'
+L "  Adaptador          : $($interfaz.nombre)"
+L "  Tipo de conexion   : $($interfaz.tipo)"
+L "  Velocidad enlace   : $($interfaz.velocidad)"
+if ($interfaz.senal) { L "  Senal Wi-Fi        : $($interfaz.senal)" }
+L ''
+L '  ---- ESTADO RED LOCAL (PUERTA DE ENLACE) ----'
+L "  Puerta de enlace   : $(if ($gwIp) { $gwIp } else { 'NO CONFIGURADA' })"
+if ($gwRes.ms -ne 9999) {
+    L "  Latencia           : $($gwRes.latencia)  [$($gwRes.est_gw)]"
+    L "  Jitter             : $($gwRes.jitter) ms"
+    L "  Perdida            : $($gwRes.perdida) %"
+} elseif ($gwIp) {
+    L '  Latencia           : SIN RESPUESTA'
 }
 L ''
+L '  ---- DIAGNOSTICO RED LOCAL ----'
+L "  $diagLocal"
+foreach ($o in $obsLocal) { L "  - $o" }
+L ''
+if ($rutaGw -and $rutaGw.saltos.Count -gt 0) {
+    L '  --- RUTA HACIA LA PUERTA DE ENLACE ---'
+    foreach ($s in $rutaGw.saltos) {
+        $ms = if ($s.ms -eq '-') { '   --  ' } else { ('{0,4} ms' -f $s.ms) }
+        L ('  #{0,-3} {1}  {2}  ({3})' -f $s.num, $ms, $s.host, $s.categoria)
+    }
+    L ''
+    L $rutaGw.raw
+    L ''
+}
+L '  ---- DNS ----'
+if ($interfaz.dns.Count -gt 0) {
+    L "  Servidores DNS     : $($interfaz.dns -join ', ')"
+} else {
+    L '  Servidores DNS     : NINGUNO CONFIGURADO'
+}
+foreach ($d in $dnsServidores) {
+    $estadoD = if (-not $hayResolveDns) { 'NO PROBADO' } elseif ($d.ok -eq $d.total) { "RESPONDE ($($d.ms) ms)" } elseif ($d.ok -gt 0) { "PARCIAL ($($d.ok)/$($d.total) consultas, $($d.ms) ms)" } else { 'NO RESPONDE' }
+    L ("  DNS {0,-15}: {1}" -f $d.ip, $estadoD)
+}
+foreach ($d in $dnsSistema) {
+    $estadoN = if ($d.res.ok) { "OK ($($d.res.ms) ms)" } else { 'NO SE RESUELVE' }
+    L ("  Resolver {0,-18}: {1}" -f $d.nombre, $estadoN)
+}
+L "  DNS publico 8.8.8.8: $(if ($dnsPublico.ok) { "RESPONDE ($($dnsPublico.ms) ms)" } elseif ($hayResolveDns) { 'NO RESPONDE' } else { 'NO PROBADO' })"
+L ''
+L '  ---- DIAGNOSTICO DNS ----'
+L "  $diagDns"
+L ''
 L '  ---- CONECTIVIDAD DE SALIDA ----'
+L "  Internet por IP    : $(if ($internetPorIp) { 'SI' } else { 'NO' })"
 L '  Puerto 443 (HTTPS) : Prueba de conexion saliente a internet'
 L "  Resultado          : $puerto443Salida"
 L '  (ABIERTO = el firewall permite trafico HTTPS hacia internet)'
 L ''
+
+if ($sinRed) {
+    L '=================================================='
+    L '***SIN CONEXION***'
+    L '=================================================='
+    L ''
+    L '  No hay respuesta de la red local ni salida a internet.'
+    L '  No se ejecutaron las pruebas de Google y SAP.'
+    L '  Revisar cable / Wi-Fi, que el equipo este conectado a la red y el equipo de red de la sucursal.'
+    L ''
+} else {
 
 # =====================
 # SECCION GOOGLE
@@ -547,9 +737,8 @@ L '***SERVICIO SAP***'
 L '=================================================='
 L ''
 L "  Servidor SAP       : $SAP_HOST"
-L "  IP Destino         : $SERVER_IP (Puerto $SERVER_PORT)"
+L "  IP Destino         : $SERVER_IP"
 L "  Region detectada   : $region (Umbral: $umbralRojo ms)"
-L ''
 if ($srv.latencia -ne 9999) {
     L "  Latencia ICMP      : $($srv.latencia) ms  [$($srv.est_lat)]"
     L "  Jitter             : $($srv.jitter) ms  [$($srv.est_jit)]"
@@ -557,7 +746,6 @@ if ($srv.latencia -ne 9999) {
 } else {
     L '  Latencia ICMP      : SIN RESPUESTA'
 }
-L "  Puerto SAP ($SERVER_PORT)  : $puertoSap"
 L ''
 L '  ---- DIAGNOSTICO SAP ----'
 L "  $diagTxt"
@@ -575,6 +763,9 @@ L '  --- REGISTRO CRUDO DE TRACEROUTE SAP ---'
 L ''
 L $ruta.raw
 L ''
+
+} # fin if/else $sinRed
+
 L ''
 L "  Diagnostico completado el $(Get-Date -Format 'dd-MM-yyyy HH:mm:ss')."
 
@@ -597,8 +788,20 @@ function Color-Estado($e) { switch ($e) { 'OK' { 'Green' } { $_ -in 'ELEVADO', '
 Write-Host ''
 Write-Host '---------------- RESULTADOS ----------------' -ForegroundColor Cyan
 Write-Host ("  Ubicacion : {0}, {1}  |  IP Publica: {2}" -f $geo.ciudad, $geo.pais, $geo.ip) -ForegroundColor Gray
-Write-Host ("  Puerto 443 salida (HTTPS): {0}" -f $puerto443Salida) -ForegroundColor $(if ($puerto443Salida -eq 'ABIERTO') { 'Green' } else { 'Red' })
 Write-Host ''
+Write-Host '  [RED LOCAL]' -ForegroundColor Cyan
+Write-Host ("  Conexion         : {0}  {1}" -f $interfaz.tipo, $(if ($interfaz.senal) { "(senal $($interfaz.senal))" } else { '' })) -ForegroundColor Gray
+Write-Host ("  Puerta de enlace : {0}" -f $gwRes.latencia) -ForegroundColor (Color-Estado $gwRes.est_gw)
+Write-Host "  $diagLocal" -ForegroundColor $colorLocal
+foreach ($o in $obsLocal) { Write-Host "  - $o" -ForegroundColor Yellow }
+Write-Host ''
+Write-Host '  [DNS]' -ForegroundColor Cyan
+Write-Host "  $diagDns" -ForegroundColor $colorDns
+Write-Host ("  Salida a internet (HTTPS): {0}" -f $puerto443Salida) -ForegroundColor $(if ($puerto443Salida -eq 'ABIERTO') { 'Green' } else { 'Red' })
+Write-Host ''
+if ($sinRed) {
+    Write-Host '  SIN CONEXION: no se ejecutaron las pruebas de Google y SAP.' -ForegroundColor Red
+} else {
 Write-Host '  [SERVICIOS GOOGLE]' -ForegroundColor Cyan
 foreach ($nombre in $resultadosGoogle.Keys) {
     $res = $resultadosGoogle[$nombre]
@@ -612,9 +815,9 @@ $latTxtSap = if ($srv.latencia -eq 9999) { 'Sin Resp.' } else { "$($srv.latencia
 Write-Host ("  Latencia SAP ({0} ms umbral): {1}" -f $umbralRojo, $latTxtSap) -ForegroundColor (Color-Estado $srv.est_lat)
 Write-Host ("  Jitter           : {0} ms" -f $srv.jitter) -ForegroundColor (Color-Estado $srv.est_jit)
 Write-Host ("  Perdida paquetes : {0} %" -f $srv.perdida) -ForegroundColor (Color-Estado $srv.est_perd)
-Write-Host ("  Puerto SAP       : {0}" -f $puertoSap) -ForegroundColor $(if ($puertoSap -eq 'ABIERTO') { 'Green' } else { 'Red' })
 Write-Host ''
 Write-Host "  $diagTxt" -ForegroundColor $diagColor
+}
 Write-Host ''
 if ($guardado) {
     Write-Host "Informe guardado en: $rutaInforme" -ForegroundColor Green
