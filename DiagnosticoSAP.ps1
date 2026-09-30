@@ -1,43 +1,36 @@
 <#
-    Informe Tecnico de Conectividad SAP
-    -----------------------------------
-    Ejecuta el diagnostico de red hacia el servicio SAP y guarda
-    automaticamente el informe en el Escritorio como "Informe SAP.txt".
+    Informe Tecnico de Conectividad - Servicios Google y SAP
+    ---------------------------------------------------------
+    Ejecuta el diagnostico de red hacia los servicios Google y SAP,
+    y guarda el informe en el Escritorio como "Informe Servicios.txt".
 
-    La IP y el puerto del servicio NO van en este archivo: se entregan
-    como parametros (o se piden por pantalla si no se indican).
-
-    Uso (pegar en PowerShell):
-        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1))) -ServerIp <IP> -Port <PUERTO>
-
-    Uso local:
-        powershell -ExecutionPolicy Bypass -File .\DiagnosticoSAP.ps1 -ServerIp <IP> -Port <PUERTO>
+    Uso:
+        irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
 #>
-param(
-    [string]$ServerIp,
-    [int]$Port
-)
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# --- DATOS DEL SERVICIO (parametros o ingreso manual) ---
-$ipValida = { param($v) $a = $null; ($v -match '^\d{1,3}(\.\d{1,3}){3}$') -and [System.Net.IPAddress]::TryParse($v, [ref]$a) }
-while (-not (& $ipValida $ServerIp)) {
-    if ($ServerIp) { Write-Host "IP no valida: $ServerIp" -ForegroundColor Red }
-    $ServerIp = (Read-Host 'Ingrese la IP del servicio SAP').Trim()
-}
-while ($Port -lt 1 -or $Port -gt 65535) {
-    $entrada = (Read-Host 'Ingrese el puerto del servicio SAP').Trim()
-    $num = 0
-    if ([int]::TryParse($entrada, [ref]$num)) { $Port = $num } else { Write-Host "Puerto no valido: $entrada" -ForegroundColor Red }
-}
+# --- CONFIGURACION SAP (codificada en base64) ---
+function Dec($b) { [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) }
+$SAP_HOST    = Dec 'c2FwLmFsby1ncm91cC5jb20='
+$SERVER_PORT = [int](Dec 'NjEzNTE=')
 
-$SERVER_IP   = $ServerIp
-$SERVER_PORT = $Port
+# --- SERVICIOS GOOGLE ---
+$SERVICIOS_GOOGLE = [ordered]@{
+    'Google Meet'  = 'meet.google.com'
+    'Google Drive' = 'drive.google.com'
+    'Google Chat'  = 'chat.google.com'
+    'Google Mail'  = 'mail.google.com'
+}
+$PUERTO_GOOGLE = 443
 
-# Referencias WonderNetwork
+# Umbrales latencia TCP Google (ms)
+$GOOGLE_UMBRAL_OK   = 150
+$GOOGLE_UMBRAL_ROJO = 300
+
+# Referencias WonderNetwork para SAP
 $REFERENCIAS = @{
     'Chile'    = @{ ciudad = 'Santiago'; EU = 210; US = 160 }
     'Peru'     = @{ ciudad = 'Lima';     EU = 240; US = 180 }
@@ -47,11 +40,13 @@ $REFERENCIAS = @{
     'Paraguay' = @{ ciudad = 'Asuncion'; EU = 220; US = 165 }
 }
 
-$NOMBRE_INFORME = 'Informe SAP.txt'
+$NOMBRE_INFORME = 'Informe Servicios.txt'
 
-$MAX_SALTOS = 30
-$ESPERA_MS  = 800
-$LIMITE_SEG = 75
+$MAX_SALTOS        = 30
+$MAX_SALTOS_GOOGLE = 20
+$ESPERA_MS         = 800
+$LIMITE_SEG        = 75
+$LIMITE_SEG_GOOGLE = 35
 
 $KW_HOSTING      = @('hetzner', 'your-server')
 $KW_HOTEL_RED    = @('equinix', 'telehouse', 'interxion', 'digitalrealty', 'coresite', 'cyrusone', 'globalswitch', 'de-cix', 'decix', 'ams-ix', 'amsix', 'linx', 'ixp', 'datacenter')
@@ -59,6 +54,7 @@ $TOK_HOTEL_RED   = @('nap', 'ix', 'ixp')
 $KW_SUBMARINO    = @('telxius', 'sparkle', 'seabone', 'globenet', 'ufinet', 'submarin', 'subsea', 'ellalink')
 $KW_TRANSITO     = @('level3', 'lumen', 'centurylink', 'cogent', 'arelion', 'telia', 'twelve99', 'tata', 'zayo', 'sprint', 'verizon', 'retn', 'he.net', 'ntt', 'gtt')
 $KW_ISP_NACIONAL = @('entel', 'claro', 'movistar', 'telefonica', 'vtr', 'wom', 'gtd', 'netline')
+$KW_GOOGLE       = @('google', '1e100')
 
 $RE_SALTO_WIN = '^(\d+)\s+((?:<?\d+\s*ms|\*)\s+(?:<?\d+\s*ms|\*)\s+(?:<?\d+\s*ms|\*))\s*(.*)$'
 $RE_IP        = '\d{1,3}(?:\.\d{1,3}){3}'
@@ -103,7 +99,6 @@ function Obtener-DatosHostLocal {
         $ipLocal = $s.LocalEndPoint.Address.ToString()
         $s.Close()
     } catch {}
-
     $mac = 'Desconocida'
     try {
         $nic = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
@@ -151,6 +146,23 @@ function Hacer-Pings($ip, $cantidad = 10) {
     return ,$tiempos
 }
 
+function Medir-LatenciaTCP($destino, $puerto, $intentos = 5) {
+    $tiempos = @()
+    for ($i = 0; $i -lt $intentos; $i++) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $c = New-Object System.Net.Sockets.TcpClient
+        try {
+            $t = $c.ConnectAsync($destino, $puerto)
+            if ($t.Wait(3000) -and $c.Connected) {
+                $sw.Stop()
+                $tiempos += [int]$sw.ElapsedMilliseconds
+            }
+        } catch {} finally { $c.Close(); if ($sw.IsRunning) { $sw.Stop() } }
+        Start-Sleep -Milliseconds 300
+    }
+    return ,$tiempos
+}
+
 function Calcular-Jitter($tiempos) {
     if ($tiempos.Count -lt 2) { return 0 }
     $suma = 0
@@ -165,17 +177,16 @@ function Evaluar-MetricasPing($tiempos, $umbralRojo, $refMs) {
     $avg     = [math]::Floor(($tiempos | Measure-Object -Sum).Sum / $tiempos.Count)
     $perdida = [math]::Round(((10 - $tiempos.Count) / 10) * 100, 1)
     $jitter  = Calcular-Jitter $tiempos
-
     $estLat  = if ($avg -ge $umbralRojo) { 'SOBRE UMBRAL' } elseif ($avg -ge ($refMs * 1.10)) { 'ELEVADO' } else { 'OK' }
     $estJit  = if ($jitter -ge 30) { 'ALTO' } elseif ($jitter -ge 15) { 'ELEVADO' } else { 'OK' }
     $estPerd = if ($perdida -ge 3) { 'ALTA' } elseif ($perdida -ge 1) { 'LEVE' } else { 'OK' }
     return @{ latencia = $avg; jitter = $jitter; perdida = $perdida; est_lat = $estLat; est_jit = $estJit; est_perd = $estPerd }
 }
 
-function Comprobar-Puerto($ip, $puerto) {
+function Comprobar-Puerto($destino, $puerto) {
     $c = New-Object System.Net.Sockets.TcpClient
     try {
-        $t = $c.ConnectAsync($ip, $puerto)
+        $t = $c.ConnectAsync($destino, $puerto)
         if ($t.Wait(2000) -and $c.Connected) { return 'ABIERTO' }
     } catch {} finally { $c.Close() }
     return 'CERRADO/FILTRADO'
@@ -208,8 +219,16 @@ function Resolver-Nombres($ips, $esperaSeg = 4) {
     return $nombres
 }
 
-function Ejecutar-Tracert($ipDestino) {
-    $argumentos = "-d -h $MAX_SALTOS -w $ESPERA_MS $ipDestino"
+function Resolver-IP($hostname) {
+    try {
+        $addrs = [System.Net.Dns]::GetHostAddresses($hostname) | Where-Object { $_.AddressFamily -eq 'InterNetwork' }
+        if ($addrs) { return $addrs[0].ToString() }
+    } catch {}
+    return $null
+}
+
+function Ejecutar-Tracert($ipDestino, $maxSaltos = $MAX_SALTOS, $limiteSeg = $LIMITE_SEG) {
+    $argumentos = "-d -h $maxSaltos -w $ESPERA_MS $ipDestino"
     $cmdTxt = "tracert $argumentos"
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'tracert.exe'
@@ -219,7 +238,6 @@ function Ejecutar-Tracert($ipDestino) {
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
     try { $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) } catch {}
-
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
     } catch {
@@ -227,9 +245,9 @@ function Ejecutar-Tracert($ipDestino) {
     }
     $lectura = $proc.StandardOutput.ReadToEndAsync()
     $aviso = ''
-    if (-not $proc.WaitForExit($LIMITE_SEG * 1000)) {
+    if (-not $proc.WaitForExit($limiteSeg * 1000)) {
         try { $proc.Kill() } catch {}
-        $aviso = "El rastreo supero $LIMITE_SEG s y se corto."
+        $aviso = "El rastreo supero $limiteSeg s y se corto."
     }
     $salida = ''
     try { if ($lectura.Wait(5000)) { $salida = $lectura.Result } } catch {}
@@ -242,32 +260,29 @@ function Clasificar-Salto($num, $ip, $nombre, $avg, $diff, $esDestino) {
     $nivel = 'verde'
     if ($diff -ge 70 -or $avg -ge 250) { $nivel = 'rojo' }
     elseif ($diff -ge 40 -or $avg -ge 120) { $nivel = 'amarillo' }
-
     if ($num -eq '1') { return @('verde', 'Red local') }
-    if ($esDestino) { return @('verde', 'Servicio SAP (Destino Final)') }
+    if ($esDestino) { return @('verde', 'Destino Final') }
     if ($ip -and (Es-IpPrivada $ip)) { return @($nivel, 'Red privada del operador') }
     if (Test-Contiene $h $KW_HOSTING) { return @($nivel, 'Red del proveedor de destino') }
     if ((Test-Contiene $h $KW_HOTEL_RED) -or ($partes | Where-Object { $TOK_HOTEL_RED -contains $_ })) { return @($nivel, 'Datacenter / IXP') }
     if (Test-Contiene $h $KW_SUBMARINO) { return @($nivel, 'Operador de cable submarino') }
     if (Test-Contiene $h $KW_TRANSITO) { return @($nivel, 'Transito internacional') }
+    if (Test-Contiene $h $KW_GOOGLE) { return @($nivel, 'Red Google') }
     if ((Test-Contiene $h $KW_ISP_NACIONAL) -or $h.EndsWith('.cl')) { return @($nivel, 'ISP / red nacional') }
-
     if ($nivel -eq 'rojo') { return @($nivel, 'Cruce Oceanico o Cuello de botella') }
     if ($nivel -eq 'amarillo') { return @($nivel, 'Enlace submarino / Cruce fronterizo') }
     return @($nivel, 'Transito normal')
 }
 
-function Procesar-Ruta($ipDestino) {
-    $tr = Ejecutar-Tracert $ipDestino
+function Procesar-Ruta($ipDestino, $maxSaltos = $MAX_SALTOS, $limiteSeg = $LIMITE_SEG) {
+    $tr = Ejecutar-Tracert $ipDestino $maxSaltos $limiteSeg
     $crudos = @()
     $lineasFiltradas = New-Object System.Collections.Generic.List[string]
-
     foreach ($linea in ($tr.salida -split "`r?`n")) {
         if ($linea -match 'Traza completa\.|Trace complete\.') { continue }
         $lineasFiltradas.Add($linea)
         $m = [regex]::Match($linea.Trim(), $RE_SALTO_WIN)
         if (-not $m.Success) { continue }
-
         $num = $m.Groups[1].Value; $grupo = $m.Groups[2].Value; $resto = $m.Groups[3].Value
         $sondeos = [regex]::Matches($grupo, '<?[\d\.]+\s*ms|\*') | ForEach-Object { $_.Value }
         $valores = @($sondeos | Where-Object { $_ -ne '*' } | ForEach-Object { [int][math]::Floor([double]($_ -replace '[^\d\.]', '')) })
@@ -279,10 +294,8 @@ function Procesar-Ruta($ipDestino) {
             break
         }
     }
-
     $ips = $crudos | Where-Object { $_.ip } | ForEach-Object { $_.ip } | Select-Object -Unique
     $nombres = Resolver-Nombres $ips
-
     $saltos = @()
     $prevMs = 0
     $ipTrans = 'No detectada'
@@ -307,7 +320,6 @@ function Procesar-Ruta($ipDestino) {
             $saltos += ,@{ num = $c.num; host = 'Nodo protegido o tiempo de espera agotado (* * *)'; ms = '-'; nivel = 'gris'; categoria = 'Sin respuesta ICMP' }
         }
     }
-
     $cuerpo = ($lineasFiltradas -join "`r`n").Trim()
     if (-not $cuerpo) { $cuerpo = '(tracert no devolvio salida)' }
     $raw = "=== REGISTRO CRUDO DE TRACEROUTE ===`r`nComando  : $($tr.cmd)`r`n`r`n$cuerpo"
@@ -321,12 +333,16 @@ function Escribir-Paso($texto) { Write-Host "  > $texto" -ForegroundColor Cyan }
 # Ejecucion del diagnostico
 # ------------------------------------------------------------------
 
+# Resolver el dominio SAP a IP (si falla, se usa el nombre directamente)
+$SERVER_IP = Resolver-IP $SAP_HOST
+if (-not $SERVER_IP) { $SERVER_IP = $SAP_HOST }
+
 Write-Host ''
 Write-Host '==================================================' -ForegroundColor Cyan
-Write-Host '   INFORME TECNICO DE CONECTIVIDAD SAP' -ForegroundColor Cyan
-Write-Host "   IP Servicio SAP: $SERVER_IP | Puerto: $SERVER_PORT" -ForegroundColor Gray
+Write-Host '   INFORME TECNICO DE CONECTIVIDAD' -ForegroundColor Cyan
+Write-Host '   Servicios Google + SAP' -ForegroundColor Cyan
 Write-Host '==================================================' -ForegroundColor Cyan
-Write-Host 'Analizando red y rastreando saltos hacia SAP... (aprox. 30-60 seg)' -ForegroundColor Yellow
+Write-Host 'Analizando red... (aprox. 3-4 minutos por rutas completas)' -ForegroundColor Yellow
 Write-Host ''
 
 Escribir-Paso 'Detectando ubicacion e IP publica...'
@@ -364,16 +380,72 @@ if ($gwIp) {
     }
 }
 
+# Verificar salida HTTPS (puerto 443 hacia internet)
+Escribir-Paso 'Verificando salida puerto 443 (HTTPS) hacia internet...'
+$puerto443Salida = Comprobar-Puerto 'www.google.com' 443
+
+# ------------------------------------------------------------------
+# Analisis servicios Google
+# ------------------------------------------------------------------
+
+$resultadosGoogle = [ordered]@{}
+$idx = 0
+foreach ($nombre in $SERVICIOS_GOOGLE.Keys) {
+    $idx++
+    $hostG = $SERVICIOS_GOOGLE[$nombre]
+    Escribir-Paso "[$idx/4] Analizando $nombre ($hostG)..."
+
+    $res = @{
+        nombre   = $nombre
+        host     = $hostG
+        ip       = 'No resuelta'
+        lat_tcp  = 9999
+        jitter   = 0
+        perdida  = 100
+        est_lat  = 'SIN RESPUESTA'
+        est_jit  = 'OK'
+        est_perd = 'ALTA'
+        puerto   = 'CERRADO/FILTRADO'
+        ruta     = $null
+    }
+
+    $ipG = Resolver-IP $hostG
+    if ($ipG) { $res.ip = $ipG }
+
+    $tiemposTcp = Medir-LatenciaTCP $hostG $PUERTO_GOOGLE 5
+    if ($tiemposTcp.Count -gt 0) {
+        $avgTcp       = [math]::Floor(($tiemposTcp | Measure-Object -Sum).Sum / $tiemposTcp.Count)
+        $res.lat_tcp  = $avgTcp
+        $res.jitter   = Calcular-Jitter $tiemposTcp
+        $res.perdida  = [math]::Round(((5 - $tiemposTcp.Count) / 5) * 100, 1)
+        $res.est_lat  = if ($avgTcp -ge $GOOGLE_UMBRAL_ROJO) { 'SOBRE UMBRAL' } elseif ($avgTcp -ge $GOOGLE_UMBRAL_OK) { 'ELEVADO' } else { 'OK' }
+        $res.est_jit  = if ($res.jitter -ge 30) { 'ALTO' } elseif ($res.jitter -ge 15) { 'ELEVADO' } else { 'OK' }
+        $res.est_perd = if ($res.perdida -ge 3) { 'ALTA' } elseif ($res.perdida -ge 1) { 'LEVE' } else { 'OK' }
+    }
+
+    $res.puerto = Comprobar-Puerto $hostG $PUERTO_GOOGLE
+
+    if ($res.ip -ne 'No resuelta') {
+        Write-Host "    Rastreando ruta hacia $nombre..." -ForegroundColor DarkCyan
+        $res.ruta = Procesar-Ruta $res.ip $MAX_SALTOS_GOOGLE $LIMITE_SEG_GOOGLE
+    }
+
+    $resultadosGoogle[$nombre] = $res
+}
+
+# ------------------------------------------------------------------
+# Analisis SAP
+# ------------------------------------------------------------------
+
 Escribir-Paso 'Midiendo latencia, jitter y perdida hacia el servicio SAP...'
 $tiemposSrv = Hacer-Pings $SERVER_IP 10
 $srv = Evaluar-MetricasPing $tiemposSrv $umbralRojo $refMs
 
-Escribir-Paso 'Comprobando puertos TCP...'
-$puertoSap   = Comprobar-Puerto $SERVER_IP $SERVER_PORT
-$puerto443   = Comprobar-Puerto $SERVER_IP 443
+Escribir-Paso 'Comprobando puerto TCP SAP...'
+$puertoSap = Comprobar-Puerto $SERVER_IP $SERVER_PORT
 
-Escribir-Paso 'Rastreando ruta (tracert)...'
-$ruta = Procesar-Ruta $SERVER_IP
+Escribir-Paso 'Rastreando ruta hacia SAP...'
+$ruta = Procesar-Ruta $SERVER_IP $MAX_SALTOS $LIMITE_SEG
 
 if ($srv.latencia -ge $umbralRojo -or $srv.perdida -ge 3 -or $puertoSap -ne 'ABIERTO') {
     $diagTxt = 'ALERTA CRITICA: La conexion al servicio SAP presenta problemas criticos o los puertos estan bloqueados.'
@@ -393,16 +465,16 @@ if ($srv.latencia -ge $umbralRojo -or $srv.perdida -ge 3 -or $puertoSap -ne 'ABI
 $sb = New-Object System.Text.StringBuilder
 function L($t = '') { [void]$sb.AppendLine($t) }
 
-L '============='
+L '=============='
 L '***RESUMEN***'
-L '============='
+L '=============='
 L ''
 L '  ---- UBICACION DETECTADA ----'
 L "  Pais               : $($geo.pais)"
 L "  Ciudad             : $($geo.ciudad)"
 L "  Proveedor (ISP)    : $($geo.isp)"
 L "  IP Publica         : $($geo.ip)"
-L "  Referencia usada   : $pais (latencia esperada $refMs ms)"
+L "  Referencia SAP     : $pais (latencia esperada $refMs ms)"
 L ''
 L '  ---- IDENTIFICACION DEL HOST ----'
 L "  Nombre del Host    : $($datosHost.nombre)"
@@ -419,32 +491,87 @@ if ($gwRes.latencia -ne 'SIN RESPUESTA') {
     L '  Gateway            : SIN RESPUESTA'
 }
 L ''
-L '  ---- CONEXION SERVICIO SAP ----'
+L '  ---- CONECTIVIDAD DE SALIDA ----'
+L '  Puerto 443 (HTTPS) : Prueba de conexion saliente a internet'
+L "  Resultado          : $puerto443Salida"
+L '  (ABIERTO = el firewall permite trafico HTTPS hacia internet)'
+L ''
+
+# =====================
+# SECCION GOOGLE
+# =====================
+L '=================================================='
+L '***SERVICIOS GOOGLE***'
+L '=================================================='
+L ''
+
+foreach ($nombre in $resultadosGoogle.Keys) {
+    $res = $resultadosGoogle[$nombre]
+    $sepNombre = $res.nombre.ToUpper()
+    L "  ---- $sepNombre ----"
+    L "  Host               : $($res.host)"
+    L "  IP resuelta        : $($res.ip)"
+    if ($res.lat_tcp -ne 9999) {
+        L "  Latencia TCP(443)  : $($res.lat_tcp) ms  [$($res.est_lat)]"
+        L "  Jitter TCP         : $($res.jitter) ms  [$($res.est_jit)]"
+        L "  Perdida conexion   : $($res.perdida) %  [$($res.est_perd)]"
+    } else {
+        L '  Latencia TCP(443)  : SIN RESPUESTA'
+    }
+    L "  Puerto 443 (HTTPS) : $($res.puerto)"
+    L ''
+    if ($res.ruta -and $res.ruta.saltos.Count -gt 0) {
+        L "  --- RESUMEN DE RUTA HACIA $sepNombre ---"
+        foreach ($s in $res.ruta.saltos) {
+            $ms = if ($s.ms -eq '-') { '   --  ' } else { ('{0,4} ms' -f $s.ms) }
+            L ('  #{0,-3} {1}  {2}  ({3})' -f $s.num, $ms, $s.host, $s.categoria)
+        }
+        L ''
+        L "  Ruta transatlantica: $($res.ruta.transatlantica)"
+        L ''
+        L "  --- REGISTRO CRUDO TRACEROUTE $sepNombre ---"
+        L ''
+        L $res.ruta.raw
+        L ''
+    } else {
+        L "  Ruta               : No disponible"
+        L ''
+    }
+}
+
+# =====================
+# SECCION SAP
+# =====================
+L '=================================================='
+L '***SERVICIO SAP***'
+L '=================================================='
+L ''
+L "  Servidor SAP       : $SAP_HOST"
 L "  IP Destino         : $SERVER_IP (Puerto $SERVER_PORT)"
-L "  Region             : $region (Umbral: $umbralRojo ms)"
+L "  Region detectada   : $region (Umbral: $umbralRojo ms)"
+L ''
 if ($srv.latencia -ne 9999) {
-    L "  Latencia           : $($srv.latencia) ms  [$($srv.est_lat)]"
+    L "  Latencia ICMP      : $($srv.latencia) ms  [$($srv.est_lat)]"
     L "  Jitter             : $($srv.jitter) ms  [$($srv.est_jit)]"
     L "  Perdida            : $($srv.perdida) %  [$($srv.est_perd)]"
 } else {
     L '  Latencia ICMP      : SIN RESPUESTA'
 }
-L "  Puerto SAP         : $puertoSap"
-L "  Puerto 443 (HTTPS) : $puerto443"
+L "  Puerto SAP ($SERVER_PORT)  : $puertoSap"
 L ''
-L '  ---- DIAGNOSTICO GENERAL ----'
+L '  ---- DIAGNOSTICO SAP ----'
 L "  $diagTxt"
 L ''
 L '  --- IP RUTA TRANSATLANTICA ---'
 L "  Detectada          : $($ruta.transatlantica)"
 L ''
-L '  --- RESUMEN DE RUTA ---'
+L '  --- RESUMEN DE RUTA SAP ---'
 foreach ($s in $ruta.saltos) {
     $ms = if ($s.ms -eq '-') { '   --  ' } else { ('{0,4} ms' -f $s.ms) }
     L ('  #{0,-3} {1}  {2}  ({3})' -f $s.num, $ms, $s.host, $s.categoria)
 }
 L ''
-L '  --- REGISTRO CRUDO DE TRACEROUTE ---'
+L '  --- REGISTRO CRUDO DE TRACEROUTE SAP ---'
 L ''
 L $ruta.raw
 L ''
@@ -469,14 +596,23 @@ function Color-Estado($e) { switch ($e) { 'OK' { 'Green' } { $_ -in 'ELEVADO', '
 
 Write-Host ''
 Write-Host '---------------- RESULTADOS ----------------' -ForegroundColor Cyan
-Write-Host ("  Ubicacion             : {0}, {1}" -f $geo.ciudad, $geo.pais) -ForegroundColor Gray
-Write-Host ("  IP Publica            : {0}" -f $geo.ip) -ForegroundColor Gray
-$latTxt = if ($srv.latencia -eq 9999) { 'Sin Resp.' } else { "$($srv.latencia) ms" }
-Write-Host ("  Latencia Servicio SAP : {0} (Umbral: {1} ms)" -f $latTxt, $umbralRojo) -ForegroundColor (Color-Estado $srv.est_lat)
-Write-Host ("  Jitter                : {0} ms" -f $srv.jitter) -ForegroundColor (Color-Estado $srv.est_jit)
-Write-Host ("  Perdida de paquetes   : {0} %" -f $srv.perdida) -ForegroundColor (Color-Estado $srv.est_perd)
-Write-Host ("  Puerto SAP ({0})    : {1}" -f $SERVER_PORT, $puertoSap) -ForegroundColor $(if ($puertoSap -eq 'ABIERTO') { 'Green' } else { 'Red' })
-Write-Host ("  Puerto 443 (HTTPS)    : {0}" -f $puerto443) -ForegroundColor $(if ($puerto443 -eq 'ABIERTO') { 'Green' } else { 'Yellow' })
+Write-Host ("  Ubicacion : {0}, {1}  |  IP Publica: {2}" -f $geo.ciudad, $geo.pais, $geo.ip) -ForegroundColor Gray
+Write-Host ("  Puerto 443 salida (HTTPS): {0}" -f $puerto443Salida) -ForegroundColor $(if ($puerto443Salida -eq 'ABIERTO') { 'Green' } else { 'Red' })
+Write-Host ''
+Write-Host '  [SERVICIOS GOOGLE]' -ForegroundColor Cyan
+foreach ($nombre in $resultadosGoogle.Keys) {
+    $res = $resultadosGoogle[$nombre]
+    $latTxt = if ($res.lat_tcp -eq 9999) { 'Sin Resp.' } else { "$($res.lat_tcp) ms" }
+    $col = Color-Estado $res.est_lat
+    Write-Host ("  {0,-14}: Latencia TCP {1,-10}  Puerto 443: {2}" -f $res.nombre, $latTxt, $res.puerto) -ForegroundColor $col
+}
+Write-Host ''
+Write-Host '  [SERVICIO SAP]' -ForegroundColor Cyan
+$latTxtSap = if ($srv.latencia -eq 9999) { 'Sin Resp.' } else { "$($srv.latencia) ms" }
+Write-Host ("  Latencia SAP ({0} ms umbral): {1}" -f $umbralRojo, $latTxtSap) -ForegroundColor (Color-Estado $srv.est_lat)
+Write-Host ("  Jitter           : {0} ms" -f $srv.jitter) -ForegroundColor (Color-Estado $srv.est_jit)
+Write-Host ("  Perdida paquetes : {0} %" -f $srv.perdida) -ForegroundColor (Color-Estado $srv.est_perd)
+Write-Host ("  Puerto SAP       : {0}" -f $puertoSap) -ForegroundColor $(if ($puertoSap -eq 'ABIERTO') { 'Green' } else { 'Red' })
 Write-Host ''
 Write-Host "  $diagTxt" -ForegroundColor $diagColor
 Write-Host ''

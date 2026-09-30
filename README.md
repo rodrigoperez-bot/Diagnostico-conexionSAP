@@ -1,32 +1,31 @@
-# Diagnostico de conexion SAP
+# Diagnostico de conexion - Servicios Google y SAP
 
-Script de PowerShell que evalua el enlace desde el PC del trabajador hacia el servicio SAP y deja un informe en el Escritorio.
+Script de PowerShell que evalua el enlace desde el PC del trabajador hacia Google Meet, Google Drive, Google Mail, Google Chat y el servicio SAP, y deja un informe en el Escritorio.
 
 ## Como ejecutarlo
 
-1. Abrir **PowerShell** (Inicio > escribir "PowerShell" > Enter).
-2. Pegar el comando entregado por TI y presionar Enter:
+1. Abrir PowerShell (Inicio > escribir "PowerShell" > Enter).
+2. Pegar este comando y presionar Enter:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1))) -ServerIp <IP> -Port <PUERTO>
+irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
 ```
 
-> La IP y el puerto del servicio no se publican en este repositorio. TI los entrega por un canal interno.
-> Si se ejecuta sin `-ServerIp` / `-Port`, el script los pide por pantalla.
-
-3. Esperar entre 30 y 60 segundos. Al terminar se muestra un resumen y se guarda **`Informe SAP.txt` en el Escritorio**.
+3. Esperar entre 3 y 4 minutos. Al terminar se muestra un resumen y se guarda **Informe Servicios.txt** en el Escritorio.
+4. Enviar ese archivo a TI.
 
 ## Que informa
 
 - Nombre del host, direccion MAC e IP local
 - IP publica, pais, ciudad y proveedor (ISP)
 - Gateway local: latencia, jitter y perdida
-- Servicio SAP: latencia, jitter, perdida y estado del puerto SAP y del 443
-- Diagnostico general (OPTIMO / ELEVADO / ALERTA CRITICA)
-- IP de la ruta transatlantica detectada
-- Resumen de la ruta salto a salto y registro crudo del `tracert`
+- Salida a internet por el puerto 443 (HTTPS)
+- Google Meet, Drive, Mail y Chat: latencia TCP, jitter, perdida, puerto 443 y ruta salto a salto
+- Servicio SAP: latencia, jitter, perdida, estado del puerto SAP y ruta salto a salto
+- Diagnostico SAP (OPTIMO / ELEVADO / ALERTA CRITICA)
+- Registro crudo del tracert de cada servicio
 
 ## Requisitos
 
 - Windows con PowerShell 5.1 o superior
-- Acceso a `raw.githubusercontent.com`
+- Acceso a raw.githubusercontent.com
