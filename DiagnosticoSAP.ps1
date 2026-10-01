@@ -177,7 +177,7 @@ function Evaluar-MetricasPing($tiempos, $umbralRojo, $refMs) {
     $avg     = [math]::Floor(($tiempos | Measure-Object -Sum).Sum / $tiempos.Count)
     $perdida = [math]::Round(((10 - $tiempos.Count) / 10) * 100, 1)
     $jitter  = Calcular-Jitter $tiempos
-    $estLat  = if ($avg -ge $umbralRojo) { 'SOBRE UMBRAL' } elseif ($avg -gt $refMs) { 'SOBRE LO ESPERADO' } else { 'OK' }
+    $estLat  = if ($avg -ge $umbralRojo) { 'SOBRE UMBRAL' } elseif ($avg -ge ($refMs * 1.10)) { 'ELEVADO' } else { 'OK' }
     $estJit  = if ($jitter -ge 30) { 'ALTO' } elseif ($jitter -ge 15) { 'ELEVADO' } else { 'OK' }
     $estPerd = if ($perdida -ge 3) { 'ALTA' } elseif ($perdida -ge 1) { 'LEVE' } else { 'OK' }
     return @{ latencia = $avg; jitter = $jitter; perdida = $perdida; est_lat = $estLat; est_jit = $estJit; est_perd = $estPerd }
@@ -519,7 +519,7 @@ $region = Detectar-RegionServidor $SERVER_IP
 $refs = $REFERENCIAS[$pais]
 $refMs = if ($region -eq 'EU') { $refs.EU } elseif ($region -eq 'US') { $refs.US } else { [math]::Min($refs.EU, $refs.US) }
 $umbralRojo     = [math]::Ceiling($refMs * 1.20)
-$umbralAmarillo = $refMs
+$umbralAmarillo = [math]::Ceiling($refMs * 1.10)
 
 # ------------------------------------------------------------------
 # Analisis servicios Google
@@ -587,12 +587,8 @@ $ruta = Procesar-Ruta $SERVER_IP $MAX_SALTOS $LIMITE_SEG
 if ($srv.latencia -ge $umbralRojo -or $srv.perdida -ge 3 -or $puertoSap -ne 'ABIERTO') {
     $diagTxt = 'ALERTA CRITICA: La conexion al servicio SAP presenta problemas criticos o esta bloqueada.'
     $diagColor = 'Red'
-} elseif ($srv.latencia -gt $umbralAmarillo -or $srv.jitter -ge 15 -or $srv.perdida -gt 0) {
-    $motivos = @()
-    if ($srv.latencia -gt $umbralAmarillo) { $motivos += "la latencia ($($srv.latencia) ms) supera la esperada ($refMs ms) en $($srv.latencia - $refMs) ms" }
-    if ($srv.jitter -ge 15) { $motivos += "jitter alto ($($srv.jitter) ms)" }
-    if ($srv.perdida -gt 0) { $motivos += "perdida de paquetes ($($srv.perdida) %)" }
-    $diagTxt = "ELEVADO: $($motivos -join '; '). Rendimiento irregular hacia el servicio SAP."
+} elseif ($srv.latencia -ge $umbralAmarillo -or $srv.jitter -ge 15 -or $srv.perdida -gt 0) {
+    $diagTxt = 'ELEVADO: Fluctuaciones moderadas o latencia superior a lo esperado hacia el servicio SAP. Rendimiento irregular.'
     $diagColor = 'Yellow'
 } else {
     $diagTxt = 'OPTIMO (OK): Parametros dentro de rangos ideales. Conectividad estable y fluida hacia el servicio SAP.'
@@ -736,10 +732,9 @@ L ''
 L "  Servidor SAP       : $SAP_HOST"
 L "  IP Destino         : $SERVER_IP"
 L "  Region detectada   : $region (Umbral: $umbralRojo ms)"
-L "  Latencia esperada  : $refMs ms (referencia desde $pais)"
+L "  Latencia esperada  : $refMs ms (referencia desde $pais, elevada desde $umbralAmarillo ms)"
 if ($srv.latencia -ne 9999) {
-    $difTxt = if ($srv.latencia -gt $refMs) { "  (+$($srv.latencia - $refMs) ms sobre lo esperado)" } else { '' }
-    L "  Latencia ICMP      : $($srv.latencia) ms  [$($srv.est_lat)]$difTxt"
+    L "  Latencia ICMP      : $($srv.latencia) ms  [$($srv.est_lat)]"
     L "  Jitter             : $($srv.jitter) ms  [$($srv.est_jit)]"
     L "  Perdida            : $($srv.perdida) %  [$($srv.est_perd)]"
 } else {
@@ -782,7 +777,7 @@ try {
 # Resumen en pantalla
 # ------------------------------------------------------------------
 
-function Color-Estado($e) { switch ($e) { 'OK' { 'Green' } { $_ -in 'ELEVADO', 'LEVE', 'SOBRE LO ESPERADO' } { 'Yellow' } default { 'Red' } } }
+function Color-Estado($e) { switch ($e) { 'OK' { 'Green' } { $_ -in 'ELEVADO', 'LEVE' } { 'Yellow' } default { 'Red' } } }
 
 Write-Host ''
 Write-Host '---------------- RESULTADOS ----------------' -ForegroundColor Cyan
