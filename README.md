@@ -20,9 +20,8 @@ irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/m
 - IP publica, pais, ciudad y proveedor (ISP)
 - Red local (se revisa primero): tipo de conexion (cable o Wi-Fi), senal Wi-Fi, velocidad del enlace, latencia, jitter, perdida y ruta hacia la puerta de enlace, con deteccion de cuellos de botella
 - DNS: servidores configurados, si responden, tiempo de resolucion y diagnostico de problemas de DNS
-- Salida a internet
 - Google Meet, Drive, Mail y Chat: latencia, jitter, perdida y ruta salto a salto
-- Servicio SAP: latencia, jitter, perdida y ruta salto a salto
+- Servicio SAP: latencia esperada segun el pais, latencia, jitter, perdida y ruta salto a salto
 - Diagnostico SAP (OPTIMO / ELEVADO / ALERTA CRITICA)
 - Registro crudo del tracert de cada servicio
 
