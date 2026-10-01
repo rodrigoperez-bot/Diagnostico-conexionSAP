@@ -613,7 +613,6 @@ L "  Pais               : $($geo.pais)"
 L "  Ciudad             : $($geo.ciudad)"
 L "  Proveedor (ISP)    : $($geo.isp)"
 L "  IP Publica         : $($geo.ip)"
-L "  Referencia SAP     : $pais (latencia esperada $refMs ms)"
 L ''
 L '  ---- IDENTIFICACION DEL HOST ----'
 L "  Nombre del Host    : $($datosHost.nombre)"
@@ -668,12 +667,6 @@ L "  DNS publico 8.8.8.8: $(if ($dnsPublico.ok) { "RESPONDE ($($dnsPublico.ms) m
 L ''
 L '  ---- DIAGNOSTICO DNS ----'
 L "  $diagDns"
-L ''
-L '  ---- CONECTIVIDAD DE SALIDA ----'
-L "  Internet por IP    : $(if ($internetPorIp) { 'SI' } else { 'NO' })"
-L '  Puerto 443 (HTTPS) : Prueba de conexion saliente a internet'
-L "  Resultado          : $puerto443Salida"
-L '  (ABIERTO = el firewall permite trafico HTTPS hacia internet)'
 L ''
 
 if ($sinRed) {
@@ -739,6 +732,7 @@ L ''
 L "  Servidor SAP       : $SAP_HOST"
 L "  IP Destino         : $SERVER_IP"
 L "  Region detectada   : $region (Umbral: $umbralRojo ms)"
+L "  Latencia esperada  : $refMs ms (referencia desde $pais)"
 if ($srv.latencia -ne 9999) {
     L "  Latencia ICMP      : $($srv.latencia) ms  [$($srv.est_lat)]"
     L "  Jitter             : $($srv.jitter) ms  [$($srv.est_jit)]"
@@ -797,7 +791,6 @@ foreach ($o in $obsLocal) { Write-Host "  - $o" -ForegroundColor Yellow }
 Write-Host ''
 Write-Host '  [DNS]' -ForegroundColor Cyan
 Write-Host "  $diagDns" -ForegroundColor $colorDns
-Write-Host ("  Salida a internet (HTTPS): {0}" -f $puerto443Salida) -ForegroundColor $(if ($puerto443Salida -eq 'ABIERTO') { 'Green' } else { 'Red' })
 Write-Host ''
 if ($sinRed) {
     Write-Host '  SIN CONEXION: no se ejecutaron las pruebas de Google y SAP.' -ForegroundColor Red
@@ -812,6 +805,7 @@ foreach ($nombre in $resultadosGoogle.Keys) {
 Write-Host ''
 Write-Host '  [SERVICIO SAP]' -ForegroundColor Cyan
 $latTxtSap = if ($srv.latencia -eq 9999) { 'Sin Resp.' } else { "$($srv.latencia) ms" }
+Write-Host ("  Latencia esperada: {0} ms (referencia desde {1})" -f $refMs, $pais) -ForegroundColor Gray
 Write-Host ("  Latencia SAP ({0} ms umbral): {1}" -f $umbralRojo, $latTxtSap) -ForegroundColor (Color-Estado $srv.est_lat)
 Write-Host ("  Jitter           : {0} ms" -f $srv.jitter) -ForegroundColor (Color-Estado $srv.est_jit)
 Write-Host ("  Perdida paquetes : {0} %" -f $srv.perdida) -ForegroundColor (Color-Estado $srv.est_perd)
