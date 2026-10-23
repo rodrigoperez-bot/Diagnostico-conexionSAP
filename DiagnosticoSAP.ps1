@@ -2,7 +2,7 @@
     Informe Tecnico de Conectividad - Servicios Google y SAP
     ---------------------------------------------------------
     Ejecuta el diagnostico de red hacia los servicios Google y SAP,
-    y guarda el informe en el Escritorio como "Informe Servicios.txt".
+    y guarda el informe en el Escritorio como "<HOST>_<WiFi|Ethernet>_<dd-MM-yyyy>_<HH-mm>.txt".
 
     Uso:
         irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
@@ -39,8 +39,6 @@ $REFERENCIAS = @{
     'Colombia' = @{ ciudad = 'Bogota';   EU = 190; US = 140 }
     'Paraguay' = @{ ciudad = 'Asuncion'; EU = 220; US = 165 }
 }
-
-$NOMBRE_INFORME = 'Informe Servicios.txt'
 
 $MAX_SALTOS        = 30
 $MAX_SALTOS_GOOGLE = 20
@@ -761,10 +759,16 @@ L ''
 } # fin if/else $sinRed
 
 L ''
-L "  Diagnostico completado el $(Get-Date -Format 'dd-MM-yyyy HH:mm:ss')."
+$fechaFin = Get-Date
+L "  Diagnostico completado el $($fechaFin.ToString('dd-MM-yyyy HH:mm:ss'))."
+
+# Nombre del informe: HOST_Adaptador_dd-MM-yyyy_HH-mm.txt (Windows no admite ':' en nombres de archivo)
+$adaptador = switch ($interfaz.tipo) { 'Wi-Fi' { 'WiFi' } 'Cable (Ethernet)' { 'Ethernet' } default { $_ } }
+$nombreInforme = '{0}_{1}_{2}.txt' -f $datosHost.nombre, $adaptador, $fechaFin.ToString('dd-MM-yyyy_HH-mm')
+$nombreInforme = $nombreInforme.Split([System.IO.Path]::GetInvalidFileNameChars()) -join '-'
 
 $escritorio = [Environment]::GetFolderPath('Desktop')
-$rutaInforme = Join-Path $escritorio $NOMBRE_INFORME
+$rutaInforme = Join-Path $escritorio $nombreInforme
 $guardado = $true
 try {
     [System.IO.File]::WriteAllText($rutaInforme, $sb.ToString(), (New-Object System.Text.UTF8Encoding($true)))
