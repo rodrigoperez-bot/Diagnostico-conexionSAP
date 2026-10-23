@@ -29,3 +29,4 @@ irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/m
 
 - Windows con PowerShell 5.1 o superior
 - Acceso a raw.githubusercontent.com
+
