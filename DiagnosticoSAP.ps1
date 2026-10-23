@@ -2,7 +2,7 @@
     Informe Tecnico de Conectividad - Servicios Google y SAP
     ---------------------------------------------------------
     Ejecuta el diagnostico de red hacia los servicios Google y SAP,
-    y guarda el informe en el Escritorio como "<HOST>_<WiFi|Ethernet>_<dd-MM-yyyy>_<HH-mm>.txt".
+    y guarda el informe en el Escritorio como "<HOST>_<wifi|ethernet>_<dd.MM.yyyy>_<hh.mm><am|pm>.txt".
 
     Uso:
         irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
@@ -762,9 +762,9 @@ L ''
 $fechaFin = Get-Date
 L "  Diagnostico completado el $($fechaFin.ToString('dd-MM-yyyy HH:mm:ss'))."
 
-# Nombre del informe: HOST_Adaptador_dd-MM-yyyy_HH-mm.txt (Windows no admite ':' en nombres de archivo)
-$adaptador = switch ($interfaz.tipo) { 'Wi-Fi' { 'WiFi' } 'Cable (Ethernet)' { 'Ethernet' } default { $_ } }
-$nombreInforme = '{0}_{1}_{2}.txt' -f $datosHost.nombre, $adaptador, $fechaFin.ToString('dd-MM-yyyy_HH-mm')
+# Nombre del informe: HOST_adaptador_dd.MM.yyyy_hh.mmam/pm.txt (Windows no admite '/' ni ':' en nombres de archivo)
+$adaptador = switch ($interfaz.tipo) { 'Wi-Fi' { 'wifi' } 'Cable (Ethernet)' { 'ethernet' } default { "$_".ToLower() } }
+$nombreInforme = '{0}_{1}_{2}.txt' -f $datosHost.nombre, $adaptador, ($fechaFin.ToString('dd.MM.yyyy_hh.mm') + $(if ($fechaFin.Hour -lt 12) { 'am' } else { 'pm' }))
 $nombreInforme = $nombreInforme.Split([System.IO.Path]::GetInvalidFileNameChars()) -join '-'
 
 $escritorio = [Environment]::GetFolderPath('Desktop')

@@ -11,7 +11,7 @@ Script de PowerShell que evalua el enlace desde el PC del trabajador hacia Googl
 irm https://raw.githubusercontent.com/rodrigoperez-bot/Diagnostico-conexionSAP/main/DiagnosticoSAP.ps1 | iex
 ```
 
-3. Esperar entre 3 y 4 minutos. Si no hay red local ni internet, el script lo indica y termina antes. Al terminar se muestra un resumen y se guarda el informe en el Escritorio con el nombre del equipo, el tipo de conexion y la fecha y hora, por ejemplo **PC-VENTAS01_WiFi_23-10-2026_15-42.txt**.
+3. Esperar entre 3 y 4 minutos. Si no hay red local ni internet, el script lo indica y termina antes. Al terminar se muestra un resumen y se guarda el informe en el Escritorio con el nombre del equipo, el tipo de conexion y la fecha y hora, por ejemplo **PC-VENTAS01_wifi_23.10.2026_03.42pm.txt**.
 4. Enviar ese archivo a TI.
 
 ## Que informa
